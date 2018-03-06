@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -116,9 +117,9 @@ func (tn *TestNode) Upload(lf *LocalFile, dataPieces, parityPieces uint64) (*Rem
 }
 
 // UploadNewFile initiates the upload of a filesize bytes large file.
-func (tn *TestNode) UploadNewFile(filesize int, dataPieces uint64, parityPieces uint64) (rf *RemoteFile, err error) {
+func (tn *TestNode) UploadNewFile(filesize int, dataPieces uint64, parityPieces uint64) (lf *LocalFile, rf *RemoteFile, err error) {
 	// Create file for upload
-	lf, err := NewFile(filesize)
+	lf, err = NewFile(filesize)
 	if err != nil {
 		err = build.ExtendErr("failed to create file", err)
 		return
@@ -134,8 +135,8 @@ func (tn *TestNode) UploadNewFile(filesize int, dataPieces uint64, parityPieces 
 
 // UploadNewFileBlocking uploads a filesize bytes large file and waits for the
 // upload to reach 100% progress and redundancy.
-func (tn *TestNode) UploadNewFileBlocking(filesize int, dataPieces uint64, parityPieces uint64) (rf *RemoteFile, err error) {
-	rf, err = tn.UploadNewFile(filesize, dataPieces, parityPieces)
+func (tn *TestNode) UploadNewFileBlocking(filesize int, dataPieces uint64, parityPieces uint64) (lf *LocalFile, rf *RemoteFile, err error) {
+	lf, rf, err = tn.UploadNewFile(filesize, dataPieces, parityPieces)
 	if err != nil {
 		return
 	}
@@ -170,10 +171,7 @@ func (tn *TestNode) WaitForDownload(lf *LocalFile, rf *RemoteFile) error {
 		return err
 	}
 	// Verify checksum
-	if err := lf.checkIntegrity(); err != nil {
-		return err
-	}
-	return nil
+	return lf.checkIntegrity()
 }
 
 // WaitForUploadProgress waits for a file to reach a certain upload progress.
@@ -202,7 +200,7 @@ func (tn *TestNode) WaitForUploadRedundancy(rf *RemoteFile, redundancy float64) 
 		return errors.New("file is not tracked by renter")
 	}
 	// Wait until it reaches the redundancy
-	return Retry(1000, 100*time.Millisecond, func() error {
+	return Retry(600, 100*time.Millisecond, func() error {
 		file, err := tn.FileInfo(rf)
 		if err != nil {
 			return build.ExtendErr("couldn't retrieve FileInfo", err)
@@ -212,4 +210,43 @@ func (tn *TestNode) WaitForUploadRedundancy(rf *RemoteFile, redundancy float64) 
 		}
 		return nil
 	})
+}
+
+// WaitForDecreasingRedundancy waits until the redundancy decreases to a
+// certain point.
+func (tn *TestNode) WaitForDecreasingRedundancy(rf *RemoteFile, redundancy float64) error {
+	// Check if file is tracked by renter at all
+	if _, err := tn.FileInfo(rf); err != nil {
+		return errors.New("file is not tracked by renter")
+	}
+	// Wait until it reaches the redundancy
+	return Retry(1000, 100*time.Millisecond, func() error {
+		file, err := tn.FileInfo(rf)
+		if err != nil {
+			return build.ExtendErr("couldn't retrieve FileInfo", err)
+		}
+		if file.Redundancy > redundancy {
+			return fmt.Errorf("redundancy should be %v but was %v", redundancy, file.Redundancy)
+		}
+		return nil
+	})
+}
+
+// knowsHost checks if tn has a certain host in its hostdb. This check is
+// performed using the host's public key.
+func (tn *TestNode) knowsHost(host *TestNode) error {
+	hdag, err := tn.HostDbActiveGet()
+	if err != nil {
+		return err
+	}
+	for _, h := range hdag.Hosts {
+		pk, err := host.HostPublicKey()
+		if err != nil {
+			return err
+		}
+		if reflect.DeepEqual(h.PublicKey, pk) {
+			return nil
+		}
+	}
+	return errors.New("host ist unknown")
 }
